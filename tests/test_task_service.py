@@ -65,3 +65,24 @@ def test_combine_text() -> None:
     voice = {"file_id": "v", "file_unique_id": "u", "duration": 1}
     messages = [make_message(text="раз"), make_message(caption="два", voice=voice), make_message(voice=voice)]
     assert combine_text(messages) == "раз\n\nдва"
+
+
+def test_forwarded_photo_album_text_and_files(tmp_path: Path) -> None:
+    webhook = FakeWebhook()
+    service, _ = _service(tmp_path, webhook)
+    bot = FakeBot(paths={"p1": "photos/file_1.jpg", "d1": "documents/file_2.pdf"})
+    photo = make_message(
+        photo=[{"file_id": "p1", "file_unique_id": "p", "width": 10, "height": 10}],
+        caption="что тут?",
+        forward_origin={"type": "hidden_user", "date": 0, "sender_user_name": "Аня"},
+    )
+    doc = make_message(message_id=2, document={"file_id": "d1", "file_unique_id": "d", "file_name": "cv.pdf"})
+
+    asyncio.run(service.submit_messages(bot, [photo, doc]))  # type: ignore[arg-type]
+
+    (payload,) = webhook.calls
+    assert payload["text"] == "[Переслано от Аня]\nчто тут?"
+    assert [(f["type"], Path(f["path"]).name, f["caption"]) for f in payload["files"]] == [
+        ("photo", "01-photo.jpg", "что тут?"),
+        ("document", "02-cv.pdf", None),
+    ]

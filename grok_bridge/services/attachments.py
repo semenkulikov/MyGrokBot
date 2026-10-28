@@ -19,6 +19,10 @@ _SAFE_NAME_RE = re.compile(r"[^\w.-]+", re.UNICODE)
 
 # Расширения по умолчанию, если Telegram не вернул путь с расширением
 _DEFAULT_SUFFIX = {
+    "photo": ".jpg",
+    "video": ".mp4",
+    "animation": ".mp4",
+    "sticker": ".webp",
     "voice": ".ogg",
     "audio": ".mp3",
     "video_note": ".mp4",
@@ -70,11 +74,55 @@ def extract_attachments(message: Message) -> list[AttachmentRef]:
         )
         caption = None
 
-    for kind in ("voice", "audio", "video_note"):
+    if message.photo:
+        add("photo", message.photo[-1])  # самый крупный размер
+    if message.animation is not None:
+        add("animation", message.animation)  # у GIF Telegram дублирует его в document
+    elif message.document is not None:
+        add("document", message.document)
+    for kind in ("video", "sticker", "voice", "audio", "video_note"):
         media = getattr(message, kind, None)
         if media is not None:
             add(kind, media)
     return refs
+
+
+def _user_name(user: Any) -> str:
+    name = " ".join(part for part in (_attr(user, "first_name"), _attr(user, "last_name")) if part)
+    username = _attr(user, "username")
+    return f"{name} (@{username})" if username else name or "неизвестно"
+
+
+def forward_source(message: Message) -> str | None:
+    """От кого переслано сообщение (None, если оно не пересланное)."""
+    origin = message.forward_origin
+    if origin is None:
+        return None
+    if (user := _attr(origin, "sender_user")) is not None:
+        return _user_name(user)
+    if (name := _attr(origin, "sender_user_name")) is not None:
+        return str(name)
+    chat = _attr(origin, "sender_chat") or _attr(origin, "chat")
+    if chat is not None:
+        return _attr(chat, "title") or _attr(chat, "username") or str(_attr(chat, "id"))
+    return "неизвестно"
+
+
+def special_content_text(message: Message) -> str | None:
+    """Текстовое описание содержимого без файла: геолокация, контакт, стикер."""
+    if message.venue is not None:
+        venue = message.venue
+        return (f"[Место: {venue.title}, {venue.address} "
+                f"({venue.location.latitude}, {venue.location.longitude})]")
+    if message.location is not None:
+        return f"[Геолокация: {message.location.latitude}, {message.location.longitude}]"
+    if message.contact is not None:
+        contact = message.contact
+        name = " ".join(part for part in (contact.first_name, contact.last_name) if part)
+        return f"[Контакт: {name}, {contact.phone_number}]"
+    if message.sticker is not None:
+        return f"[Стикер {message.sticker.emoji or ''}]".replace(" ]", "]")
+    return None
 
 
 def safe_file_name(name: str) -> str:

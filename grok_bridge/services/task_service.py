@@ -10,7 +10,13 @@ from typing import Any
 from aiogram import Bot
 from aiogram.types import Message
 
-from grok_bridge.services.attachments import AttachmentRef, download_attachments, extract_attachments
+from grok_bridge.services.attachments import (
+    AttachmentRef,
+    download_attachments,
+    extract_attachments,
+    forward_source,
+    special_content_text,
+)
 from grok_bridge.services.webhook_client import WebhookClient, WebhookError
 from grok_bridge.storage import TaskStatus, TaskStore
 
@@ -24,7 +30,13 @@ def new_task_id() -> str:
 
 
 def message_text(message: Message) -> str:
-    return message.text or message.caption or ""
+    """Текст сообщения (text или caption) с пометкой о пересылке и описанием геолокации/контакта."""
+    parts = [message.text or message.caption or "", special_content_text(message) or ""]
+    text = "\n".join(part for part in parts if part)
+    source = forward_source(message)
+    if source is not None:
+        text = f"[Переслано от {source}]" + (f"\n{text}" if text else "")
+    return text
 
 
 def combine_text(messages: Sequence[Message]) -> str:

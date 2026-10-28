@@ -15,7 +15,10 @@ from grok_bridge.storage import TaskStore
 logger = logging.getLogger(__name__)
 
 # Сообщения, которые бот превращает в задачи
-TASK_FILTER = F.text | F.caption | F.voice | F.audio | F.video_note
+TASK_FILTER = (
+    F.text | F.caption | F.voice | F.audio | F.video_note | F.photo | F.document | F.video
+    | F.animation | F.sticker | F.location | F.contact | F.forward_origin
+)
 
 
 def _format_uptime(seconds: float) -> str:
@@ -35,7 +38,7 @@ async def cmd_id(message: Message) -> None:
 async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет! Я мост к Джарвису (Grok Bot).\n"
-        "Пиши задачу текстом или голосовым: я передам её и пришлю сюда ответ.\n\n"
+        "Пиши задачу текстом или голосовым, присылай фото и файлы: я передам их и пришлю сюда ответ.\n\n"
         "/status — состояние бота\n/id — твой Telegram ID"
     )
 
@@ -54,7 +57,7 @@ async def handle_task(message: Message, bot: Bot, task_service: TaskService) -> 
 
 
 async def handle_unsupported(message: Message) -> None:
-    await message.answer("Пока понимаю только текст и голосовые сообщения.")
+    await message.answer("Такой тип сообщений пока не поддерживается: пришли текст, голосовое, фото или файл.")
 
 
 def build_routers(allowed_user_ids: list[int]) -> list[Router]:
