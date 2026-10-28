@@ -20,7 +20,7 @@ from grok_bridge.services.attachments import (
     special_content_text,
 )
 from grok_bridge.services.webhook_client import WebhookClient, WebhookError
-from grok_bridge.storage import TaskStatus, TaskStore
+from grok_bridge.storage import Button, TaskStatus, TaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,7 @@ class TaskService:
         attachments: Sequence[AttachmentRef] = (),
         parent_task_id: str | None = None,
         source_message_ids: Sequence[int] = (),
+        reply_to_message_id: int | None = None,
         extra: dict[str, Any] | None = None,
     ) -> str:
         task_id = new_task_id()
@@ -117,9 +118,11 @@ class TaskService:
             _describe_for_log(text, attachments),
         )
 
+        if reply_to_message_id is None and source_message_ids:
+            reply_to_message_id = source_message_ids[0]
         reply_to = (
-            ReplyParameters(message_id=source_message_ids[0], allow_sending_without_reply=True)
-            if source_message_ids else None
+            ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
+            if reply_to_message_id is not None else None
         )
         ack = await bot.send_message(chat_id, f"{ACK_TEXT}\n(задача {task_id})", reply_parameters=reply_to)
         self._store.set_ack_message(task_id, ack.message_id)
@@ -144,3 +147,15 @@ class TaskService:
             logger.error("Задача %s не передана: %s", task_id, exc)
             await ack.edit_text(f"⚠️ Не смог передать задачу {task_id} Джарвису.\nПричина: {exc}")
         return task_id
+
+    async def submit_button(self, bot: Bot, *, user_id: int, button: Button, message_id: int | None) -> str:
+        """Нажатие inline-кнопки: выбор уходит новой задачей-продолжением."""
+        return await self.submit(
+            bot,
+            chat_id=button.chat_id,
+            user_id=user_id,
+            text=button.value,
+            parent_task_id=button.task_id,
+            reply_to_message_id=message_id,
+            extra={"button": {"text": button.text, "value": button.value}},
+        )

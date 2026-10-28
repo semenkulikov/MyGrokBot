@@ -2,6 +2,7 @@
 
 Протокол: ассистент сначала (опционально) кладёт <task_id>.png, затем <task_id>.txt.
 Появление .txt означает, что ответ готов к отправке.
+<task_id>.buttons.json (кладётся до .txt) — варианты ответа, бот покажет их inline-кнопками.
 Пока задача в работе, <task_id>.progress.txt — промежуточный статус: бот подставляет его
 в сообщение «Принял, работаю…» и удаляет файл.
 """
@@ -18,8 +19,9 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import FSInputFile, ReplyParameters
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, ReplyParameters
 
+from grok_bridge.services.buttons import ButtonsError, build_keyboard, load_buttons
 from grok_bridge.storage import TaskStatus, TaskStore, parse_time
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ PHOTO_SUFFIXES = (".png", ".jpg", ".jpeg")
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024
 PROGRESS_SUFFIX = ".progress.txt"
+BUTTONS_SUFFIX = ".buttons.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,10 +39,11 @@ class OutboxItem:
     task_id: str
     text_path: Path
     photo_path: Path | None = None
+    buttons_path: Path | None = None
 
     @property
     def files(self) -> list[Path]:
-        return [p for p in (self.photo_path, self.text_path) if p is not None]
+        return [p for p in (self.photo_path, self.buttons_path, self.text_path) if p is not None]
 
     def read_text(self) -> str:
         return self.text_path.read_text(encoding="utf-8").strip()
@@ -76,7 +80,15 @@ def scan_outbox(outbox_dir: Path, min_age_seconds: float = 0.0, now: float | Non
             (p for p in (text_path.with_suffix(s) for s in PHOTO_SUFFIXES) if p.is_file()),
             None,
         )
-        items.append(OutboxItem(task_id=task_id, text_path=text_path, photo_path=photo))
+        buttons = outbox_dir / f"{task_id}{BUTTONS_SUFFIX}"
+        items.append(
+            OutboxItem(
+                task_id=task_id,
+                text_path=text_path,
+                photo_path=photo,
+                buttons_path=buttons if buttons.is_file() else None,
+            )
+        )
     return items
 
 
@@ -285,19 +297,36 @@ class OutboxWatcher:
         logger.info("Ответ на задачу %s отправлен в чат %s", item.task_id, chat_id)
         return True
 
+    def _keyboard(self, chat_id: int, item: OutboxItem) -> InlineKeyboardMarkup | None:
+        if item.buttons_path is None:
+            return None
+        try:
+            rows = load_buttons(item.buttons_path)
+        except ButtonsError as exc:
+            logger.warning("Кнопки для %s не показаны: %s", item.task_id, exc)
+            return None
+        saved = self._store.add_buttons(item.task_id, chat_id, [[(b.text, b.value) for b in row] for row in rows])
+        return build_keyboard(saved)
+
     async def _send(self, chat_id: int, item: OutboxItem) -> list[int]:
         """Отправляет ответ и возвращает id сообщений (чтобы reply на них продолжал задачу)."""
         text = item.read_text()
+        keyboard = self._keyboard(chat_id, item)
         message_ids: list[int] = []
         if item.photo_path is not None:
             caption = text if len(text) <= TELEGRAM_CAPTION_LIMIT else None
-            sent = await self._bot.send_photo(chat_id, FSInputFile(item.photo_path), caption=caption or None)
+            sent = await self._bot.send_photo(
+                chat_id, FSInputFile(item.photo_path), caption=caption or None,
+                reply_markup=keyboard if caption is not None else None,
+            )
             message_ids.append(sent.message_id)
             if caption is not None:
                 return message_ids
         elif not text:
             text = "(пустой ответ)"
-        for chunk in split_text(text):
-            sent = await self._bot.send_message(chat_id, chunk)
+        chunks = split_text(text)
+        for index, chunk in enumerate(chunks):
+            is_last = index == len(chunks) - 1
+            sent = await self._bot.send_message(chat_id, chunk, reply_markup=keyboard if is_last else None)
             message_ids.append(sent.message_id)
         return message_ids

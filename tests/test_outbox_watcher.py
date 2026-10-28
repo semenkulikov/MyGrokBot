@@ -116,3 +116,33 @@ def test_timeout_disabled(tmp_path: Path) -> None:
     _age_task(store, "old", 600)
     asyncio.run(watcher.process_once())
     assert bot.sent == []
+
+
+def test_buttons_are_attached_to_last_chunk(tmp_path: Path) -> None:
+    watcher, store, bot = _watcher(tmp_path, typing_interval_seconds=None)
+    store.add("t1", 42, 42, "удалить файлы?")
+    outbox = tmp_path / "outbox"
+    (outbox / "t1.buttons.json").write_text('["Да", "Нет"]', encoding="utf-8")
+    (outbox / "t1.txt").write_text("Удалить 3 файла?", encoding="utf-8")
+
+    asyncio.run(watcher.process_once())
+
+    keyboard = bot.sent_kwargs[-1]["reply_markup"]
+    callback = keyboard.inline_keyboard[0][0].callback_data
+    button = store.get_button(int(callback.split(":")[1]))
+    assert button is not None and (button.task_id, button.text, button.chat_id) == ("t1", "Да", 42)
+    assert sorted(p.name for p in (tmp_path / "sent").iterdir()) == ["t1.buttons.json", "t1.txt"]
+
+    assert store.use_buttons_of(button.button_id)
+    assert not store.use_buttons_of(button.button_id + 1)  # «Нет» того же ответа тоже погашена
+
+
+def test_broken_buttons_file_still_delivers_text(tmp_path: Path) -> None:
+    watcher, _store, bot = _watcher(tmp_path, typing_interval_seconds=None)
+    (tmp_path / "outbox" / "t2.buttons.json").write_text("не json", encoding="utf-8")
+    (tmp_path / "outbox" / "t2.txt").write_text("ответ", encoding="utf-8")
+
+    asyncio.run(watcher.process_once())
+
+    assert [m.text for m in bot.sent] == ["ответ"]
+    assert bot.sent_kwargs[0]["reply_markup"] is None

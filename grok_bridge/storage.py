@@ -14,6 +14,16 @@ class TaskStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class Button:
+    button_id: int
+    task_id: str
+    chat_id: int
+    text: str
+    value: str
+    used: bool
+
+
+@dataclass(frozen=True, slots=True)
 class Task:
     task_id: str
     chat_id: int
@@ -43,6 +53,15 @@ CREATE TABLE IF NOT EXISTS task_messages (
     message_id INTEGER NOT NULL,
     task_id    TEXT NOT NULL,
     PRIMARY KEY (chat_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS buttons (
+    button_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    TEXT NOT NULL,
+    chat_id    INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    used       INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -134,6 +153,39 @@ class TaskStore:
             "SELECT * FROM tasks WHERE status = ? ORDER BY created_at", (TaskStatus.PENDING,)
         ).fetchall()
         return [self._row_to_task(row) for row in rows]
+
+    def add_buttons(self, task_id: str, chat_id: int, rows: list[list[tuple[str, str]]]) -> list[list[tuple[int, str]]]:
+        """Сохраняет кнопки ответа (text, value); возвращает ряды (button_id, text) для клавиатуры."""
+        now = _now()
+        result: list[list[tuple[int, str]]] = []
+        with self._conn:
+            for row in rows:
+                saved: list[tuple[int, str]] = []
+                for text, value in row:
+                    cursor = self._conn.execute(
+                        "INSERT INTO buttons (task_id, chat_id, text, value, created_at) VALUES (?, ?, ?, ?, ?)",
+                        (task_id, chat_id, text, value, now),
+                    )
+                    saved.append((int(cursor.lastrowid or 0), text))
+                result.append(saved)
+        return result
+
+    def get_button(self, button_id: int) -> Button | None:
+        row = self._conn.execute("SELECT * FROM buttons WHERE button_id = ?", (button_id,)).fetchone()
+        if row is None:
+            return None
+        return Button(row["button_id"], row["task_id"], row["chat_id"], row["text"], row["value"], bool(row["used"]))
+
+    def use_buttons_of(self, button_id: int) -> bool:
+        """Помечает использованными все кнопки того же ответа. False — уже нажимали."""
+        button = self.get_button(button_id)
+        if button is None or button.used:
+            return False
+        with self._conn:
+            self._conn.execute(
+                "UPDATE buttons SET used = 1 WHERE task_id = ? AND chat_id = ?", (button.task_id, button.chat_id)
+            )
+        return True
 
     def overdue(self, created_before: datetime) -> list[Task]:
         """Задачи в работе, созданные раньше created_before, о которых ещё не предупреждали."""

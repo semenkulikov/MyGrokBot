@@ -110,3 +110,24 @@ def test_reply_to_bot_message_continues_task(tmp_path: Path) -> None:
     # и пользовательское сообщение, и «Принял…» теперь ведут к новой задаче
     assert store.task_for_message(100, 7) == task_id
     assert store.task_for_message(100, bot.sent[0].message_id) == task_id
+
+
+def test_button_press_becomes_child_task(tmp_path: Path) -> None:
+    webhook = FakeWebhook()
+    service, store = _service(tmp_path, webhook)
+    bot = FakeBot()
+    store.add("parent", 100, 100, "удалить?")
+    (((button_id, _),),) = store.add_buttons("parent", 100, [[("Да, удаляй", "yes")]])
+    button = store.get_button(button_id)
+    assert button is not None
+
+    task_id = asyncio.run(service.submit_button(bot, user_id=100, button=button, message_id=900))  # type: ignore[arg-type]
+
+    (payload,) = webhook.calls
+    assert payload["text"] == "yes"
+    assert payload["parent_task_id"] == "parent"
+    assert payload["button"] == {"text": "Да, удаляй", "value": "yes"}
+    assert bot.sent_kwargs[0]["reply_parameters"].message_id == 900
+    assert store.task_for_message(100, 900) is None  # ответ родителя не перепривязан
+    task = store.get(task_id)
+    assert task is not None and task.parent_task_id == "parent"
