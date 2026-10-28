@@ -24,6 +24,8 @@ logger = logging.getLogger("grok_bridge")
 
 BOT_COMMANDS = [
     BotCommand(command="start", description="Что умеет бот"),
+    BotCommand(command="tasks", description="Задачи в работе"),
+    BotCommand(command="cancel", description="Отменить задачу: последнюю или /cancel <id>"),
     BotCommand(command="status", description="Состояние бота и задачи в работе"),
     BotCommand(command="id", description="Показать мой Telegram ID"),
 ]

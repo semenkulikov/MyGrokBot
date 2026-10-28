@@ -11,6 +11,7 @@ class TaskStatus(StrEnum):
     PENDING = "pending"
     DONE = "done"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,10 +149,14 @@ class TaskStore:
             )
         return cursor.rowcount > 0
 
-    def pending(self) -> list[Task]:
-        rows = self._conn.execute(
-            "SELECT * FROM tasks WHERE status = ? ORDER BY created_at", (TaskStatus.PENDING,)
-        ).fetchall()
+    def pending(self, chat_id: int | None = None) -> list[Task]:
+        """Задачи в работе (от старых к новым), опционально только одного чата."""
+        query = "SELECT * FROM tasks WHERE status = ?"
+        params: list[object] = [TaskStatus.PENDING.value]
+        if chat_id is not None:
+            query += " AND chat_id = ?"
+            params.append(chat_id)
+        rows = self._conn.execute(query + " ORDER BY created_at, rowid", params).fetchall()
         return [self._row_to_task(row) for row in rows]
 
     def add_buttons(self, task_id: str, chat_id: int, rows: list[list[tuple[str, str]]]) -> list[list[tuple[int, str]]]:

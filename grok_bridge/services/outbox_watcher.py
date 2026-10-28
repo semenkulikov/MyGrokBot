@@ -255,7 +255,8 @@ class OutboxWatcher:
                 await self._bot.send_message(
                     task.chat_id,
                     f"⌛ Задача {task.task_id} в работе уже больше {minutes} мин без ответа.\n"
-                    "Возможно, она ещё выполняется, а может, зависла. Если ответ появится, пришлю его сюда.",
+                    "Возможно, она ещё выполняется, а может, зависла. Если ответ появится, пришлю его сюда.\n"
+                    f"Отменить: /cancel {task.task_id}",
                     reply_parameters=reply_to,
                 )
             except TelegramAPIError as exc:
@@ -294,7 +295,10 @@ class OutboxWatcher:
             return False
 
         try:
-            message_ids = await self._send(chat_id, item)
+            task = self._store.get(item.task_id)
+            cancelled = task is not None and task.status is TaskStatus.CANCELLED
+            note = f"(Ответ на отменённую задачу {item.task_id})" if cancelled else None
+            message_ids = await self._send(chat_id, item, note=note)
         except (TelegramAPIError, OSError) as exc:
             attempts = self._attempts.get(item.task_id, 0) + 1
             self._attempts[item.task_id] = attempts
@@ -308,7 +312,8 @@ class OutboxWatcher:
 
         archive(item, self._sent_dir)
         self._store.link_messages(item.task_id, chat_id, message_ids)
-        self._store.set_status(item.task_id, TaskStatus.DONE)
+        if not cancelled:  # отменённая остаётся отменённой, даже если ответ всё же пришёл
+            self._store.set_status(item.task_id, TaskStatus.DONE)
         self._attempts.pop(item.task_id, None)
         logger.info("Ответ на задачу %s отправлен в чат %s", item.task_id, chat_id)
         return True
@@ -350,9 +355,11 @@ class OutboxWatcher:
             message_ids.append(sent.message_id)
         return message_ids
 
-    async def _send(self, chat_id: int, item: OutboxItem) -> list[int]:
+    async def _send(self, chat_id: int, item: OutboxItem, note: str | None = None) -> list[int]:
         """Отправляет ответ и возвращает id сообщений (чтобы reply на них продолжал задачу)."""
         text = item.read_text()
+        if note:
+            text = f"{note}\n\n{text}" if text else note
         keyboard = self._keyboard(chat_id, item)
         attachments = item.attachments()
         message_ids: list[int] = []

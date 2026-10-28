@@ -2,10 +2,11 @@
 
 import logging
 import time
+from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from grok_bridge.bot.middlewares import AllowedUsersMiddleware
@@ -13,7 +14,7 @@ from grok_bridge.services.batcher import MessageBatcher
 from grok_bridge.services.buttons import CALLBACK_PREFIX, parse_callback
 from grok_bridge.services.task_service import TaskService
 from grok_bridge.services.webhook_client import WebhookClient
-from grok_bridge.storage import TaskStore
+from grok_bridge.storage import Task, TaskStatus, TaskStore, parse_time
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,9 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет! Я мост к Джарвису (Grok Bot).\n"
         "Пиши задачу текстом или голосовым, присылай фото и файлы: я передам их и пришлю сюда ответ.\n\n"
-        "/status — состояние бота\n/id — твой Telegram ID"
+        "/tasks — задачи в работе\n/cancel — отменить последнюю задачу (или /cancel <id>)\n"
+        "/status — состояние бота\n/id — твой Telegram ID\n\n"
+        "Ответь (reply) на сообщение бота, чтобы продолжить ту же задачу."
     )
 
 
@@ -53,6 +56,66 @@ async def cmd_status(message: Message, store: TaskStore, webhook: WebhookClient,
         f"Задач в работе: {store.count_pending()}\n"
         f"Вебхук: {'настроен' if webhook.configured else 'не настроен (WEBHOOK_URL пуст)'}"
     )
+
+
+TASKS_LIST_LIMIT = 20
+
+
+def _task_age(task: Task) -> str:
+    minutes = int((datetime.now(timezone.utc) - parse_time(task.created_at)).total_seconds() // 60)
+    return f"{minutes} мин" if minutes < 120 else f"{minutes // 60} ч"
+
+
+def format_tasks(tasks: list[Task]) -> str:
+    if not tasks:
+        return "Задач в работе нет ✅"
+    lines = [f"Задач в работе: {len(tasks)}"]
+    for task in tasks[-TASKS_LIST_LIMIT:]:
+        snippet = (task.text or "(без текста)").replace("\n", " ")
+        if len(snippet) > 60:
+            snippet = snippet[:60] + "…"
+        lines.append(f"• {task.task_id} — {_task_age(task)} — {snippet}")
+    if len(tasks) > TASKS_LIST_LIMIT:
+        lines.append(f"…и ещё {len(tasks) - TASKS_LIST_LIMIT} (показаны последние)")
+    lines.append("\nОтменить: /cancel <id> или просто /cancel для последней")
+    return "\n".join(lines)
+
+
+async def cmd_tasks(message: Message, store: TaskStore) -> None:
+    await message.answer(format_tasks(store.pending(chat_id=message.chat.id)))
+
+
+def cancel_task(store: TaskStore, chat_id: int, task_id: str | None) -> tuple[Task | None, str]:
+    """Отменяет задачу в работе: указанную или последнюю. Возвращает (задача, текст ответа)."""
+    if task_id:
+        task = store.get(task_id)
+        if task is None or task.chat_id != chat_id:
+            return None, f"Задача {task_id} не найдена."
+        if task.status is not TaskStatus.PENDING:
+            return None, f"Задача {task_id} уже не в работе (статус: {task.status.value})."
+    else:
+        pending = store.pending(chat_id=chat_id)
+        if not pending:
+            return None, "Нечего отменять: задач в работе нет."
+        task = pending[-1]
+    store.set_status(task.task_id, TaskStatus.CANCELLED)
+    return task, (f"🚫 Задача {task.task_id} отменена.\n"
+                  "Если Джарвис всё же пришлёт ответ, я его покажу с пометкой.")
+
+
+async def cmd_cancel(message: Message, command: CommandObject, bot: Bot, store: TaskStore) -> None:
+    task_id = (command.args or "").strip() or None
+    task, reply = cancel_task(store, message.chat.id, task_id)
+    if task is not None:
+        logger.info("Задача %s отменена пользователем", task.task_id)
+        if task.ack_message_id is not None:
+            try:
+                await bot.edit_message_text(
+                    f"🚫 Отменено\n(задача {task.task_id})", chat_id=task.chat_id, message_id=task.ack_message_id
+                )
+            except TelegramAPIError as exc:
+                logger.debug("Не удалось обновить сообщение задачи %s: %s", task.task_id, exc)
+    await message.answer(reply)
 
 
 async def handle_task(message: Message, batcher: MessageBatcher[Message]) -> None:
@@ -95,6 +158,8 @@ def build_routers(allowed_user_ids: list[int]) -> list[Router]:
     private.callback_query.register(handle_button, F.data.startswith(CALLBACK_PREFIX))
     private.message.register(cmd_start, CommandStart())
     private.message.register(cmd_status, Command("status"))
+    private.message.register(cmd_tasks, Command("tasks"))
+    private.message.register(cmd_cancel, Command("cancel"))
     private.message.register(handle_task, TASK_FILTER)
     private.message.register(handle_unsupported)
 

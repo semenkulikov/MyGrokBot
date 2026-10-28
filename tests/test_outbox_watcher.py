@@ -185,3 +185,16 @@ def test_only_files_without_text(tmp_path: Path) -> None:
     asyncio.run(watcher.process_once())
 
     assert [getattr(m, "media", None) for m in bot.sent] == [("photo", "one.png")]
+
+
+def test_late_answer_for_cancelled_task(tmp_path: Path) -> None:
+    watcher, store, bot = _watcher(tmp_path, typing_interval_seconds=None)
+    store.add("t1", 42, 42, "x")
+    store.set_status("t1", TaskStatus.CANCELLED)
+    (tmp_path / "outbox" / "t1.txt").write_text("всё-таки готово", encoding="utf-8")
+
+    asyncio.run(watcher.process_once())
+
+    assert bot.sent[0].text == "(Ответ на отменённую задачу t1)\n\nвсё-таки готово"
+    task = store.get("t1")
+    assert task is not None and task.status is TaskStatus.CANCELLED
