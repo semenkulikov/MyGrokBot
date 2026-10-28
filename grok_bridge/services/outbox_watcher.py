@@ -2,6 +2,8 @@
 
 Протокол: ассистент сначала (опционально) кладёт <task_id>.png, затем <task_id>.txt.
 Появление .txt означает, что ответ готов к отправке.
+Папка <task_id>.files/ (кладётся до .txt) — любые файлы в ответ: картинки уходят фото/альбомом,
+остальное документами.
 <task_id>.buttons.json (кладётся до .txt) — варианты ответа, бот покажет их inline-кнопками.
 Пока задача в работе, <task_id>.progress.txt — промежуточный статус: бот подставляет его
 в сообщение «Принял, работаю…» и удаляет файл.
@@ -19,7 +21,7 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, ReplyParameters
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InputMediaPhoto, ReplyParameters
 
 from grok_bridge.services.buttons import ButtonsError, build_keyboard, load_buttons
 from grok_bridge.storage import TaskStatus, TaskStore, parse_time
@@ -32,6 +34,10 @@ TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024
 PROGRESS_SUFFIX = ".progress.txt"
 BUTTONS_SUFFIX = ".buttons.json"
+FILES_DIR_SUFFIX = ".files"
+ALBUM_PHOTO_SUFFIXES = (".png", ".jpg", ".jpeg")
+VIDEO_SUFFIXES = (".mp4", ".mov")
+MEDIA_GROUP_LIMIT = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,10 +46,18 @@ class OutboxItem:
     text_path: Path
     photo_path: Path | None = None
     buttons_path: Path | None = None
+    files_dir: Path | None = None
 
     @property
     def files(self) -> list[Path]:
-        return [p for p in (self.photo_path, self.buttons_path, self.text_path) if p is not None]
+        paths = (self.photo_path, self.files_dir, self.buttons_path, self.text_path)
+        return [p for p in paths if p is not None]
+
+    def attachments(self) -> list[Path]:
+        """Файлы из <task_id>.files/ по имени (скрытые и вложенные папки пропускаются)."""
+        if self.files_dir is None:
+            return []
+        return sorted(p for p in self.files_dir.iterdir() if p.is_file() and not p.name.startswith("."))
 
     def read_text(self) -> str:
         return self.text_path.read_text(encoding="utf-8").strip()
@@ -81,12 +95,14 @@ def scan_outbox(outbox_dir: Path, min_age_seconds: float = 0.0, now: float | Non
             None,
         )
         buttons = outbox_dir / f"{task_id}{BUTTONS_SUFFIX}"
+        files_dir = outbox_dir / f"{task_id}{FILES_DIR_SUFFIX}"
         items.append(
             OutboxItem(
                 task_id=task_id,
                 text_path=text_path,
                 photo_path=photo,
                 buttons_path=buttons if buttons.is_file() else None,
+                files_dir=files_dir if files_dir.is_dir() else None,
             )
         )
     return items
@@ -308,13 +324,40 @@ class OutboxWatcher:
         saved = self._store.add_buttons(item.task_id, chat_id, [[(b.text, b.value) for b in row] for row in rows])
         return build_keyboard(saved)
 
+    async def _send_files(self, chat_id: int, paths: list[Path]) -> list[int]:
+        """Картинки — фото или альбомами по 10, видео — видео, остальное — документами."""
+        photos = [p for p in paths if p.suffix.lower() in ALBUM_PHOTO_SUFFIXES]
+        others = [p for p in paths if p not in photos]
+        message_ids: list[int] = []
+        for start in range(0, len(photos), MEDIA_GROUP_LIMIT):
+            group = photos[start:start + MEDIA_GROUP_LIMIT]
+            try:
+                if len(group) == 1:
+                    sent = await self._bot.send_photo(chat_id, FSInputFile(group[0]))
+                    message_ids.append(sent.message_id)
+                else:
+                    media = [InputMediaPhoto(media=FSInputFile(p)) for p in group]
+                    message_ids.extend(m.message_id for m in await self._bot.send_media_group(chat_id, media))
+            except TelegramBadRequest as exc:
+                # Например, слишком большая картинка для фото — отправим файлами
+                logger.warning("Картинки не ушли как фото (%s), отправляю документами", exc)
+                others = group + others
+        for path in others:
+            if path.suffix.lower() in VIDEO_SUFFIXES:
+                sent = await self._bot.send_video(chat_id, FSInputFile(path))
+            else:
+                sent = await self._bot.send_document(chat_id, FSInputFile(path))
+            message_ids.append(sent.message_id)
+        return message_ids
+
     async def _send(self, chat_id: int, item: OutboxItem) -> list[int]:
         """Отправляет ответ и возвращает id сообщений (чтобы reply на них продолжал задачу)."""
         text = item.read_text()
         keyboard = self._keyboard(chat_id, item)
+        attachments = item.attachments()
         message_ids: list[int] = []
         if item.photo_path is not None:
-            caption = text if len(text) <= TELEGRAM_CAPTION_LIMIT else None
+            caption = text if len(text) <= TELEGRAM_CAPTION_LIMIT and not attachments else None
             sent = await self._bot.send_photo(
                 chat_id, FSInputFile(item.photo_path), caption=caption or None,
                 reply_markup=keyboard if caption is not None else None,
@@ -322,8 +365,11 @@ class OutboxWatcher:
             message_ids.append(sent.message_id)
             if caption is not None:
                 return message_ids
-        elif not text:
+        message_ids.extend(await self._send_files(chat_id, attachments))
+        if not text and not message_ids:
             text = "(пустой ответ)"
+        elif not text and keyboard is not None:
+            text = "Выбери вариант:"
         chunks = split_text(text)
         for index, chunk in enumerate(chunks):
             is_last = index == len(chunks) - 1

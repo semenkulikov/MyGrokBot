@@ -146,3 +146,42 @@ def test_broken_buttons_file_still_delivers_text(tmp_path: Path) -> None:
 
     assert [m.text for m in bot.sent] == ["ответ"]
     assert bot.sent_kwargs[0]["reply_markup"] is None
+
+
+def test_files_dir_is_sent_before_text_and_archived(tmp_path: Path) -> None:
+    watcher, store, bot = _watcher(tmp_path, typing_interval_seconds=None)
+    store.add("t1", 42, 42, "сделай отчёт")
+    outbox = tmp_path / "outbox"
+    files = outbox / "t1.files"
+    files.mkdir()
+    for name in ("a.png", "b.jpg", "report.pdf", "clip.mp4", ".DS_Store"):
+        (files / name).write_bytes(b"x")
+    (outbox / "t1.png").write_bytes(b"x")
+    (outbox / "t1.txt").write_text("Готово", encoding="utf-8")
+
+    asyncio.run(watcher.process_once())
+
+    kinds = [getattr(m, "media", ("text", m.text)) for m in bot.sent]
+    assert kinds == [
+        ("photo", "t1.png"),
+        ("album", "a.png"),
+        ("album", "b.jpg"),
+        ("video", "clip.mp4"),
+        ("document", "report.pdf"),
+        ("text", "Готово"),
+    ]
+    assert bot.sent[0].text == ""  # при наличии файлов текст не уходит подписью
+    assert (tmp_path / "sent" / "t1.files" / "report.pdf").is_file()
+    assert not files.exists()
+
+
+def test_only_files_without_text(tmp_path: Path) -> None:
+    watcher, _store, bot = _watcher(tmp_path, typing_interval_seconds=None)
+    files = tmp_path / "outbox" / "t1.files"
+    files.mkdir()
+    (files / "one.png").write_bytes(b"x")
+    (tmp_path / "outbox" / "t1.txt").write_text("", encoding="utf-8")
+
+    asyncio.run(watcher.process_once())
+
+    assert [getattr(m, "media", None) for m in bot.sent] == [("photo", "one.png")]

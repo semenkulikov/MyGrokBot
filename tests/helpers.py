@@ -69,6 +69,22 @@ class FakeBot(FakeDownloader):
         self.sent_kwargs.append(kwargs)
         return message
 
+    def _record(self, chat_id: int, kind: str, name: str, kwargs: dict[str, Any]) -> FakeSentMessage:
+        message = FakeSentMessage(self, chat_id, 1000 + len(self.sent), "")
+        message.media = (kind, name)  # type: ignore[attr-defined]
+        self.sent.append(message)
+        self.sent_kwargs.append(kwargs)
+        return message
+
+    async def send_document(self, chat_id: int, document: Any, **kwargs: Any) -> FakeSentMessage:
+        return self._record(chat_id, "document", Path(document.path).name, kwargs)
+
+    async def send_video(self, chat_id: int, video: Any, **kwargs: Any) -> FakeSentMessage:
+        return self._record(chat_id, "video", Path(video.path).name, kwargs)
+
+    async def send_media_group(self, chat_id: int, media: list[Any], **kwargs: Any) -> list[FakeSentMessage]:
+        return [self._record(chat_id, "album", Path(m.media.path).name, kwargs) for m in media]
+
     async def edit_message_text(self, text: str, chat_id: int, message_id: int, **kwargs: Any) -> None:
         self.edits.append((message_id, text))
 
