@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Пример автозапуска через launchd (не установлен).
+  Установка:
+    cp deploy/com.semenkulikov.mygrokbot.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.semenkulikov.mygrokbot.plist
+  Остановка:
+    launchctl bootout gui/$(id -u)/com.semenkulikov.mygrokbot
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.semenkulikov.mygrokbot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/semensaifutdinov/CursorProjects/MyGrokBot/scripts/run.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/semensaifutdinov/CursorProjects/MyGrokBot</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/semensaifutdinov/CursorProjects/MyGrokBot/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/semensaifutdinov/CursorProjects/MyGrokBot/logs/launchd.err.log</string>
+</dict>
+</plist>
