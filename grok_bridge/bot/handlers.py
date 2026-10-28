@@ -1,26 +1,21 @@
 """Обработчики Telegram-команд и сообщений."""
 
 import logging
-import secrets
 import time
-from datetime import datetime
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from grok_bridge.bot.middlewares import AllowedUsersMiddleware
-from grok_bridge.config import Settings
-from grok_bridge.services.webhook_client import WebhookClient, WebhookError
-from grok_bridge.storage import TaskStatus, TaskStore
+from grok_bridge.services.task_service import TaskService
+from grok_bridge.services.webhook_client import WebhookClient
+from grok_bridge.storage import TaskStore
 
 logger = logging.getLogger(__name__)
 
-ACK_TEXT = "Принял, работаю…"
-
-
-def new_task_id() -> str:
-    return f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
+# Сообщения, которые бот превращает в задачи
+TASK_FILTER = F.text | F.caption | F.voice | F.audio | F.video_note
 
 
 def _format_uptime(seconds: float) -> str:
@@ -40,7 +35,7 @@ async def cmd_id(message: Message) -> None:
 async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет! Я мост к Джарвису (Grok Bot).\n"
-        "Пиши задачу обычным сообщением: я передам её и пришлю сюда ответ.\n\n"
+        "Пиши задачу текстом или голосовым: я передам её и пришлю сюда ответ.\n\n"
         "/status — состояние бота\n/id — твой Telegram ID"
     )
 
@@ -54,29 +49,12 @@ async def cmd_status(message: Message, store: TaskStore, webhook: WebhookClient,
     )
 
 
-async def handle_task(message: Message, store: TaskStore, webhook: WebhookClient, settings: Settings) -> None:
-    text = message.text or message.caption or ""
-    user_id = message.from_user.id if message.from_user else message.chat.id
-    task_id = new_task_id()
-    store.add(task_id=task_id, chat_id=message.chat.id, user_id=user_id, text=text)
-    logger.info("Новая задача %s от %s: %r", task_id, user_id, text[:200])
-
-    ack = await message.answer(f"{ACK_TEXT}\n(задача {task_id})")
-    try:
-        await webhook.send_task(
-            task_id=task_id,
-            chat_id=message.chat.id,
-            text=text,
-            outbox_dir=str(settings.outbox_dir),
-        )
-    except WebhookError as exc:
-        store.set_status(task_id, TaskStatus.FAILED)
-        logger.error("Задача %s не передана: %s", task_id, exc)
-        await ack.edit_text(f"⚠️ Не смог передать задачу {task_id} Джарвису.\nПричина: {exc}")
+async def handle_task(message: Message, bot: Bot, task_service: TaskService) -> None:
+    await task_service.submit_messages(bot, [message])
 
 
 async def handle_unsupported(message: Message) -> None:
-    await message.answer("Пока понимаю только текстовые сообщения.")
+    await message.answer("Пока понимаю только текст и голосовые сообщения.")
 
 
 def build_routers(allowed_user_ids: list[int]) -> list[Router]:
@@ -88,7 +66,7 @@ def build_routers(allowed_user_ids: list[int]) -> list[Router]:
     private.message.outer_middleware(AllowedUsersMiddleware(allowed_user_ids))
     private.message.register(cmd_start, CommandStart())
     private.message.register(cmd_status, Command("status"))
-    private.message.register(handle_task, F.text | F.caption)
+    private.message.register(handle_task, TASK_FILTER)
     private.message.register(handle_unsupported)
 
     return [public, private]

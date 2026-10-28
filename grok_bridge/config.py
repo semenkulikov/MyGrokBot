@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     outbox_poll_seconds: float = Field(default=2.0, gt=0)
 
+    # Bot API отдаёт ботам файлы не больше 20 МБ
+    max_download_mb: float = Field(default=20.0, gt=0)
+
     runtime_dir: Path = BASE_DIR / "runtime"
     log_dir: Path = BASE_DIR / "logs"
     log_level: str = "INFO"
@@ -51,6 +54,14 @@ class Settings(BaseSettings):
         return self.runtime_dir / "outbox"
 
     @property
+    def inbox_dir(self) -> Path:
+        return self.runtime_dir / "inbox"
+
+    @property
+    def max_download_bytes(self) -> int:
+        return int(self.max_download_mb * 1024 * 1024)
+
+    @property
     def sent_dir(self) -> Path:
         return self.runtime_dir / "sent"
 
@@ -63,7 +74,7 @@ class Settings(BaseSettings):
         return self.runtime_dir / "tasks.sqlite3"
 
     def ensure_dirs(self) -> None:
-        for directory in (self.outbox_dir, self.sent_dir, self.failed_dir, self.log_dir):
+        for directory in (self.outbox_dir, self.inbox_dir, self.sent_dir, self.failed_dir, self.log_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
 

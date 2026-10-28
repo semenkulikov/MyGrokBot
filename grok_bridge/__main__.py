@@ -15,6 +15,7 @@ from grok_bridge.bot.handlers import build_routers
 from grok_bridge.config import ENV_FILE, Settings
 from grok_bridge.logging_setup import setup_logging
 from grok_bridge.services.outbox_watcher import OutboxWatcher
+from grok_bridge.services.task_service import TaskService
 from grok_bridge.services.webhook_client import WebhookClient
 from grok_bridge.storage import TaskStore
 
@@ -40,7 +41,21 @@ async def run(settings: Settings) -> None:
     )
     bot = Bot(token=settings.bot_token.get_secret_value())
 
-    dp = Dispatcher(settings=settings, store=store, webhook=webhook, started_at=time.monotonic())
+    task_service = TaskService(
+        store=store,
+        webhook=webhook,
+        outbox_dir=settings.outbox_dir,
+        inbox_dir=settings.inbox_dir,
+        max_download_bytes=settings.max_download_bytes,
+    )
+
+    dp = Dispatcher(
+        settings=settings,
+        store=store,
+        webhook=webhook,
+        task_service=task_service,
+        started_at=time.monotonic(),
+    )
     dp.include_routers(*build_routers(settings.allowed_user_ids))
 
     watcher = OutboxWatcher(
