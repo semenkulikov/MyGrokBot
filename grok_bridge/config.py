@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     webhook_max_attempts: int = Field(default=3, ge=1)
 
     outbox_poll_seconds: float = Field(default=2.0, gt=0)
+    # Показывать «печатает…», пока задача в работе
+    typing_indicator: bool = True
 
     # Сообщения с паузой меньше этой склеиваются в одну задачу (альбомы, фото + текст). 0 — не склеивать
     message_debounce_seconds: float = Field(default=2.5, ge=0)

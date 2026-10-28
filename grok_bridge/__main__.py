@@ -74,6 +74,7 @@ async def run(settings: Settings) -> None:
         failed_dir=settings.failed_dir,
         poll_seconds=settings.outbox_poll_seconds,
         fallback_chat_id=settings.allowed_user_ids[0] if settings.allowed_user_ids else None,
+        typing_interval_seconds=4.5 if settings.typing_indicator else None,
     )
     watcher_task = asyncio.create_task(watcher.run(), name="outbox-watcher")
 

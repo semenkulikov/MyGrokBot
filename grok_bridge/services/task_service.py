@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from aiogram import Bot
+from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message, ReplyParameters
 
 from grok_bridge.services.attachments import (
@@ -120,7 +122,12 @@ class TaskService:
             if source_message_ids else None
         )
         ack = await bot.send_message(chat_id, f"{ACK_TEXT}\n(задача {task_id})", reply_parameters=reply_to)
+        self._store.set_ack_message(task_id, ack.message_id)
         self._store.link_messages(task_id, chat_id, [*source_message_ids, ack.message_id])
+        try:
+            await bot.send_chat_action(chat_id, ChatAction.TYPING)
+        except TelegramAPIError as exc:
+            logger.debug("Не удалось показать «печатает…»: %s", exc)
 
         payload: dict[str, Any] = {"outbox_dir": str(self._outbox_dir), **(extra or {})}
         if parent_task_id is not None:

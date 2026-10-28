@@ -23,6 +23,7 @@ class Task:
     created_at: str
     updated_at: str
     parent_task_id: str | None = None
+    ack_message_id: int | None = None
 
 
 _SCHEMA = """
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS task_messages (
 # Колонки, добавленные после первой версии: миграция через ALTER TABLE на старой базе
 _ADDED_COLUMNS: dict[str, str] = {
     "parent_task_id": "TEXT",
+    "ack_message_id": "INTEGER",
 }
 
 
@@ -85,6 +87,11 @@ class TaskStore:
                 (task_id, chat_id, user_id, text, TaskStatus.PENDING, now, now, parent_task_id),
             )
         return Task(task_id, chat_id, user_id, text, TaskStatus.PENDING, now, now, parent_task_id)
+
+    def set_ack_message(self, task_id: str, message_id: int) -> None:
+        """id сообщения «Принял, работаю…» — его бот редактирует промежуточными апдейтами."""
+        with self._conn:
+            self._conn.execute("UPDATE tasks SET ack_message_id = ? WHERE task_id = ?", (message_id, task_id))
 
     def link_messages(self, task_id: str, chat_id: int, message_ids: list[int]) -> None:
         """Запоминает, к какой задаче относятся сообщения чата (для ответов reply)."""
@@ -140,4 +147,5 @@ class TaskStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             parent_task_id=row["parent_task_id"],
+            ack_message_id=row["ack_message_id"],
         )

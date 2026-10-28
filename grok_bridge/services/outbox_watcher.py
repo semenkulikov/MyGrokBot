@@ -2,6 +2,8 @@
 
 Протокол: ассистент сначала (опционально) кладёт <task_id>.png, затем <task_id>.txt.
 Появление .txt означает, что ответ готов к отправке.
+Пока задача в работе, <task_id>.progress.txt — промежуточный статус: бот подставляет его
+в сообщение «Принял, работаю…» и удаляет файл.
 """
 
 import asyncio
@@ -13,7 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import FSInputFile
 
 from grok_bridge.storage import TaskStatus, TaskStore
@@ -24,6 +27,7 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 PHOTO_SUFFIXES = (".png", ".jpg", ".jpeg")
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024
+PROGRESS_SUFFIX = ".progress.txt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +55,8 @@ def scan_outbox(outbox_dir: Path, min_age_seconds: float = 0.0, now: float | Non
 
     candidates: list[tuple[float, Path]] = []
     for text_path in outbox_dir.glob("*.txt"):
+        if text_path.name.endswith(PROGRESS_SUFFIX):
+            continue
         try:
             mtime = text_path.stat().st_mtime
         except FileNotFoundError:
@@ -71,6 +77,31 @@ def scan_outbox(outbox_dir: Path, min_age_seconds: float = 0.0, now: float | Non
         )
         items.append(OutboxItem(task_id=task_id, text_path=text_path, photo_path=photo))
     return items
+
+
+def scan_progress(outbox_dir: Path, min_age_seconds: float = 0.0, now: float | None = None) -> list[tuple[str, Path]]:
+    """Файлы <task_id>.progress.txt: (task_id, путь), от старых к новым."""
+    if not outbox_dir.is_dir():
+        return []
+    now = time.time() if now is None else now
+    found: list[tuple[float, str, Path]] = []
+    for path in outbox_dir.glob(f"*{PROGRESS_SUFFIX}"):
+        task_id = path.name[: -len(PROGRESS_SUFFIX)]
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if TASK_ID_RE.match(task_id) and now - mtime >= min_age_seconds:
+            found.append((mtime, task_id, path))
+    return [(task_id, path) for _, task_id, path in sorted(found)]
+
+
+def progress_message(task_id: str, progress: str) -> str:
+    text = f"⏳ {progress}\n(задача {task_id})"
+    if len(text) > TELEGRAM_TEXT_LIMIT:
+        keep = TELEGRAM_TEXT_LIMIT - len(f"⏳ …\n(задача {task_id})")
+        text = f"⏳ {progress[:keep]}…\n(задача {task_id})"
+    return text
 
 
 def split_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
@@ -110,6 +141,7 @@ class OutboxWatcher:
         fallback_chat_id: int | None = None,
         max_attempts: int = 5,
         min_file_age_seconds: float = 0.5,
+        typing_interval_seconds: float | None = 4.5,
     ) -> None:
         self._bot = bot
         self._store = store
@@ -121,6 +153,8 @@ class OutboxWatcher:
         self._max_attempts = max_attempts
         self._min_file_age = min_file_age_seconds
         self._attempts: dict[str, int] = {}
+        self._typing_interval = typing_interval_seconds
+        self._last_typing = 0.0
 
     async def run(self) -> None:
         logger.info("Слежу за %s (каждые %s с)", self._outbox_dir, self._poll_seconds)
@@ -134,11 +168,54 @@ class OutboxWatcher:
             await asyncio.sleep(self._poll_seconds)
 
     async def process_once(self) -> int:
+        await self._apply_progress()
+        await self._show_typing()
         delivered = 0
         for item in scan_outbox(self._outbox_dir, min_age_seconds=self._min_file_age):
             if await self._deliver(item):
                 delivered += 1
         return delivered
+
+    async def _apply_progress(self) -> None:
+        for task_id, path in scan_progress(self._outbox_dir, min_age_seconds=self._min_file_age):
+            try:
+                progress = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                logger.warning("Не удалось прочитать %s: %s", path.name, exc)
+                continue
+            path.unlink(missing_ok=True)
+            task = self._store.get(task_id)
+            if task is None or task.status is not TaskStatus.PENDING or task.ack_message_id is None or not progress:
+                logger.debug("Пропускаю промежуточный статус для %s", task_id)
+                continue
+            try:
+                await self._bot.edit_message_text(
+                    progress_message(task_id, progress), chat_id=task.chat_id, message_id=task.ack_message_id
+                )
+            except TelegramBadRequest as exc:
+                if "not modified" not in str(exc):
+                    logger.warning("Не удалось обновить статус задачи %s: %s", task_id, exc)
+            except TelegramAPIError as exc:
+                logger.warning("Не удалось обновить статус задачи %s: %s", task_id, exc)
+            else:
+                logger.info("Статус задачи %s: %r", task_id, progress[:200])
+
+    def _typing_chats(self) -> set[int]:
+        return {task.chat_id for task in self._store.pending()}
+
+    async def _show_typing(self) -> None:
+        """«печатает…» в чатах, где есть задачи в работе (Telegram держит его ~5 с)."""
+        if self._typing_interval is None:
+            return
+        now = time.monotonic()
+        if now - self._last_typing < self._typing_interval:
+            return
+        self._last_typing = now
+        for chat_id in self._typing_chats():
+            try:
+                await self._bot.send_chat_action(chat_id, ChatAction.TYPING)
+            except TelegramAPIError as exc:
+                logger.debug("Не удалось показать «печатает…» в %s: %s", chat_id, exc)
 
     def _resolve_chat_id(self, task_id: str) -> int | None:
         task = self._store.get(task_id)

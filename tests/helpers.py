@@ -62,6 +62,16 @@ class FakeBot(FakeDownloader):
         self.sent_kwargs.append(kwargs)
         return message
 
+    async def send_photo(self, chat_id: int, photo: Any, caption: str | None = None, **kwargs: Any) -> FakeSentMessage:
+        message = FakeSentMessage(self, chat_id, 1000 + len(self.sent), caption or "")
+        message.media = ("photo", Path(photo.path).name)  # type: ignore[attr-defined]
+        self.sent.append(message)
+        self.sent_kwargs.append(kwargs)
+        return message
+
+    async def edit_message_text(self, text: str, chat_id: int, message_id: int, **kwargs: Any) -> None:
+        self.edits.append((message_id, text))
+
     async def send_chat_action(self, chat_id: int, action: str, **kwargs: Any) -> bool:
         self.actions.append((chat_id, action))
         return True
