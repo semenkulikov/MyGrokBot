@@ -1,0 +1,17 @@
+# Секреты
+.env
+
+# Окружение и кэши
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Рабочие данные бота
+logs/
+runtime/
+
+# macOS / IDE
+.DS_Store
+.idea/
+.vscode/
