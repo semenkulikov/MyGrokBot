@@ -14,16 +14,18 @@ import logging
 import re
 import shutil
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.enums import ChatAction
+from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, InputMediaPhoto, ReplyParameters
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InputMediaPhoto, Message, ReplyParameters
 
 from grok_bridge.services.buttons import ButtonsError, build_keyboard, load_buttons
+from grok_bridge.services.formatting import is_parse_error, markdown_to_html
 from grok_bridge.storage import TaskStatus, TaskStore, parse_time
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,8 @@ FILES_DIR_SUFFIX = ".files"
 ALBUM_PHOTO_SUFFIXES = (".png", ".jpg", ".jpeg")
 VIDEO_SUFFIXES = (".mp4", ".mov")
 MEDIA_GROUP_LIMIT = 10
+# Сырой текст режется с запасом: HTML-разметка удлиняет его
+MARKDOWN_CHUNK_LIMIT = 3500
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,15 +138,19 @@ def progress_message(task_id: str, progress: str) -> str:
 
 
 def split_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
-    """Режет длинный текст на части под лимит Telegram, по возможности по строкам."""
+    """Режет длинный текст на части под лимит Telegram: по абзацам, строкам, пробелам."""
     chunks: list[str] = []
     rest = text
     while len(rest) > limit:
-        cut = rest.rfind("\n", 0, limit)
+        cut = -1
+        for separator in ("\n\n", "\n", " "):
+            cut = rest.rfind(separator, 0, limit)
+            if cut > limit // 2:  # не режем слишком мелко ради красивой границы
+                break
         if cut <= 0:
             cut = limit
-        chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n")
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
     if rest:
         chunks.append(rest)
     return chunks
@@ -172,6 +180,7 @@ class OutboxWatcher:
         min_file_age_seconds: float = 0.5,
         typing_interval_seconds: float | None = 4.5,
         task_timeout_seconds: float | None = 15 * 60,
+        markdown: bool = True,
     ) -> None:
         self._bot = bot
         self._store = store
@@ -186,6 +195,7 @@ class OutboxWatcher:
         self._typing_interval = typing_interval_seconds
         self._last_typing = 0.0
         self._task_timeout = task_timeout_seconds
+        self._markdown = markdown
 
     async def run(self) -> None:
         logger.info("Слежу за %s (каждые %s с)", self._outbox_dir, self._poll_seconds)
@@ -355,6 +365,26 @@ class OutboxWatcher:
             message_ids.append(sent.message_id)
         return message_ids
 
+    def _render(self, text: str, limit: int) -> tuple[str, ParseMode | None]:
+        if self._markdown and text:
+            rendered = markdown_to_html(text)
+            if len(rendered) <= limit:
+                return rendered, ParseMode.HTML
+        return text, None
+
+    async def _send_formatted(
+        self, send: Callable[[str | None, ParseMode | None], Awaitable[Message]], text: str, limit: int
+    ) -> Message:
+        """Отправка с Markdown (через HTML); если Telegram не принял разметку — обычным текстом."""
+        body, mode = self._render(text, limit)
+        try:
+            return await send(body or None, mode)
+        except TelegramBadRequest as exc:
+            if mode is None or not is_parse_error(exc):
+                raise
+            logger.warning("Telegram не принял разметку (%s), отправляю без форматирования", exc)
+            return await send(text or None, None)
+
     async def _send(self, chat_id: int, item: OutboxItem, note: str | None = None) -> list[int]:
         """Отправляет ответ и возвращает id сообщений (чтобы reply на них продолжал задачу)."""
         text = item.read_text()
@@ -365,9 +395,14 @@ class OutboxWatcher:
         message_ids: list[int] = []
         if item.photo_path is not None:
             caption = text if len(text) <= TELEGRAM_CAPTION_LIMIT and not attachments else None
-            sent = await self._bot.send_photo(
-                chat_id, FSInputFile(item.photo_path), caption=caption or None,
-                reply_markup=keyboard if caption is not None else None,
+            photo = FSInputFile(item.photo_path)
+            photo_markup = keyboard if caption is not None else None
+            sent = await self._send_formatted(
+                lambda body, mode: self._bot.send_photo(
+                    chat_id, photo, caption=body, parse_mode=mode, reply_markup=photo_markup
+                ),
+                caption or "",
+                TELEGRAM_CAPTION_LIMIT,
             )
             message_ids.append(sent.message_id)
             if caption is not None:
@@ -377,9 +412,15 @@ class OutboxWatcher:
             text = "(пустой ответ)"
         elif not text and keyboard is not None:
             text = "Выбери вариант:"
-        chunks = split_text(text)
+        chunks = split_text(text, MARKDOWN_CHUNK_LIMIT if self._markdown else TELEGRAM_TEXT_LIMIT)
         for index, chunk in enumerate(chunks):
-            is_last = index == len(chunks) - 1
-            sent = await self._bot.send_message(chat_id, chunk, reply_markup=keyboard if is_last else None)
+            markup = keyboard if index == len(chunks) - 1 else None
+            sent = await self._send_formatted(
+                lambda body, mode, markup=markup: self._bot.send_message(
+                    chat_id, body or "", parse_mode=mode, reply_markup=markup
+                ),
+                chunk,
+                TELEGRAM_TEXT_LIMIT,
+            )
             message_ids.append(sent.message_id)
         return message_ids

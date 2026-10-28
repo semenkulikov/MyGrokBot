@@ -198,3 +198,49 @@ def test_late_answer_for_cancelled_task(tmp_path: Path) -> None:
     assert bot.sent[0].text == "(Ответ на отменённую задачу t1)\n\nвсё-таки готово"
     task = store.get("t1")
     assert task is not None and task.status is TaskStatus.CANCELLED
+
+
+def test_markdown_is_sent_as_html(tmp_path: Path) -> None:
+    watcher, _store, bot = _watcher(tmp_path, typing_interval_seconds=None)
+    (tmp_path / "outbox" / "t1.txt").write_text("**Готово**: `ok`", encoding="utf-8")
+
+    asyncio.run(watcher.process_once())
+
+    assert bot.sent[0].text == "<b>Готово</b>: <code>ok</code>"
+    assert bot.sent_kwargs[0]["parse_mode"] == "HTML"
+
+
+def test_markup_error_falls_back_to_plain(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    from aiogram.exceptions import TelegramBadRequest
+
+    watcher, _store, bot = _watcher(tmp_path, typing_interval_seconds=None)
+    original = bot.send_message
+
+    async def picky(chat_id: int, text: str, **kwargs: object) -> object:
+        if kwargs.get("parse_mode"):
+            raise TelegramBadRequest(MagicMock(), "Bad Request: can't parse entities")
+        return await original(chat_id, text, **kwargs)
+
+    bot.send_message = picky  # type: ignore[method-assign]
+    (tmp_path / "outbox" / "t1.txt").write_text("**Готово**", encoding="utf-8")
+
+    asyncio.run(watcher.process_once())
+
+    assert [(m.text, kw["parse_mode"]) for m, kw in zip(bot.sent, bot.sent_kwargs, strict=True)] == [
+        ("**Готово**", None)
+    ]
+
+
+def test_plain_mode_and_long_text_chunks(tmp_path: Path) -> None:
+    watcher, _store, bot = _watcher(tmp_path, typing_interval_seconds=None, markdown=False)
+    long_text = "\n\n".join(f"Абзац {i} " + "слово " * 150 for i in range(10))
+    (tmp_path / "outbox" / "t1.txt").write_text(long_text, encoding="utf-8")
+
+    asyncio.run(watcher.process_once())
+
+    assert len(bot.sent) > 1
+    pairs = zip(bot.sent, bot.sent_kwargs, strict=True)
+    assert all(len(m.text) <= 4096 and kw["parse_mode"] is None for m, kw in pairs)
+    assert all(m.text.startswith("Абзац") for m in bot.sent)  # режется по абзацам

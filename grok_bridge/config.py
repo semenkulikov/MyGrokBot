@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     webhook_max_attempts: int = Field(default=3, ge=1)
 
     outbox_poll_seconds: float = Field(default=2.0, gt=0)
+    # markdown — ответы Grok Bot форматируются (жирный, код, ссылки); plain — как есть
+    reply_format: Literal["markdown", "plain"] = "markdown"
     # Показывать «печатает…», пока задача в работе
     typing_indicator: bool = True
     # Через сколько минут без ответа предупредить, что задача ещё в работе или зависла. 0 — не предупреждать
