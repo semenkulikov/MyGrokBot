@@ -3,12 +3,12 @@
 import logging
 import time
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from grok_bridge.bot.middlewares import AllowedUsersMiddleware
-from grok_bridge.services.task_service import TaskService
+from grok_bridge.services.batcher import MessageBatcher
 from grok_bridge.services.webhook_client import WebhookClient
 from grok_bridge.storage import TaskStore
 
@@ -52,8 +52,9 @@ async def cmd_status(message: Message, store: TaskStore, webhook: WebhookClient,
     )
 
 
-async def handle_task(message: Message, bot: Bot, task_service: TaskService) -> None:
-    await task_service.submit_messages(bot, [message])
+async def handle_task(message: Message, batcher: MessageBatcher[Message]) -> None:
+    """Сообщения копятся и через MESSAGE_DEBOUNCE_SECONDS тишины становятся одной задачей."""
+    await batcher.add(message)
 
 
 async def handle_unsupported(message: Message) -> None:

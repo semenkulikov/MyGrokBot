@@ -7,13 +7,14 @@ import sys
 import time
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, Message
 from aiogram.utils.token import TokenValidationError, validate_token
 from pydantic import ValidationError
 
 from grok_bridge.bot.handlers import build_routers
 from grok_bridge.config import ENV_FILE, Settings
 from grok_bridge.logging_setup import setup_logging
+from grok_bridge.services.batcher import MessageBatcher
 from grok_bridge.services.outbox_watcher import OutboxWatcher
 from grok_bridge.services.task_service import TaskService
 from grok_bridge.services.webhook_client import WebhookClient
@@ -49,11 +50,18 @@ async def run(settings: Settings) -> None:
         max_download_bytes=settings.max_download_bytes,
     )
 
+    batcher: MessageBatcher[Message] = MessageBatcher(
+        flush=lambda messages: task_service.submit_messages(bot, messages),
+        key=lambda message: message.chat.id,
+        delay_seconds=settings.message_debounce_seconds,
+    )
+
     dp = Dispatcher(
         settings=settings,
         store=store,
         webhook=webhook,
         task_service=task_service,
+        batcher=batcher,
         started_at=time.monotonic(),
     )
     dp.include_routers(*build_routers(settings.allowed_user_ids))
@@ -75,6 +83,7 @@ async def run(settings: Settings) -> None:
         logger.info("Бот запущен, разрешённые ID: %s", settings.allowed_user_ids or "—")
         await dp.start_polling(bot)
     finally:
+        await batcher.close()
         watcher_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await watcher_task

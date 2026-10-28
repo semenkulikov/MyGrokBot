@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     outbox_poll_seconds: float = Field(default=2.0, gt=0)
 
+    # Сообщения с паузой меньше этой склеиваются в одну задачу (альбомы, фото + текст). 0 — не склеивать
+    message_debounce_seconds: float = Field(default=2.5, ge=0)
+
     # Bot API отдаёт ботам файлы не больше 20 МБ
     max_download_mb: float = Field(default=20.0, gt=0)
 
