@@ -24,6 +24,7 @@ class Task:
     updated_at: str
     parent_task_id: str | None = None
     ack_message_id: int | None = None
+    timeout_notified: bool = False
 
 
 _SCHEMA = """
@@ -49,7 +50,14 @@ CREATE TABLE IF NOT EXISTS task_messages (
 _ADDED_COLUMNS: dict[str, str] = {
     "parent_task_id": "TEXT",
     "ack_message_id": "INTEGER",
+    "timeout_notified": "INTEGER NOT NULL DEFAULT 0",
 }
+
+
+def parse_time(value: str) -> datetime:
+    """Время из базы (ISO, UTC) в aware datetime."""
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _now() -> str:
@@ -127,6 +135,19 @@ class TaskStore:
         ).fetchall()
         return [self._row_to_task(row) for row in rows]
 
+    def overdue(self, created_before: datetime) -> list[Task]:
+        """Задачи в работе, созданные раньше created_before, о которых ещё не предупреждали."""
+        cutoff = created_before.astimezone(timezone.utc).isoformat(timespec="seconds")
+        rows = self._conn.execute(
+            "SELECT * FROM tasks WHERE status = ? AND timeout_notified = 0 AND created_at < ? ORDER BY created_at",
+            (TaskStatus.PENDING, cutoff),
+        ).fetchall()
+        return [self._row_to_task(row) for row in rows]
+
+    def mark_timeout_notified(self, task_id: str) -> None:
+        with self._conn:
+            self._conn.execute("UPDATE tasks SET timeout_notified = 1 WHERE task_id = ?", (task_id,))
+
     def count_pending(self) -> int:
         (count,) = self._conn.execute(
             "SELECT COUNT(*) FROM tasks WHERE status = ?", (TaskStatus.PENDING,)
@@ -148,4 +169,5 @@ class TaskStore:
             updated_at=row["updated_at"],
             parent_task_id=row["parent_task_id"],
             ack_message_id=row["ack_message_id"],
+            timeout_notified=bool(row["timeout_notified"]),
         )

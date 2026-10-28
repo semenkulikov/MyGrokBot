@@ -12,14 +12,15 @@ import re
 import shutil
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiogram import Bot
 from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, ReplyParameters
 
-from grok_bridge.storage import TaskStatus, TaskStore
+from grok_bridge.storage import TaskStatus, TaskStore, parse_time
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ class OutboxWatcher:
         max_attempts: int = 5,
         min_file_age_seconds: float = 0.5,
         typing_interval_seconds: float | None = 4.5,
+        task_timeout_seconds: float | None = 15 * 60,
     ) -> None:
         self._bot = bot
         self._store = store
@@ -155,6 +157,7 @@ class OutboxWatcher:
         self._attempts: dict[str, int] = {}
         self._typing_interval = typing_interval_seconds
         self._last_typing = 0.0
+        self._task_timeout = task_timeout_seconds
 
     async def run(self) -> None:
         logger.info("Слежу за %s (каждые %s с)", self._outbox_dir, self._poll_seconds)
@@ -170,6 +173,7 @@ class OutboxWatcher:
     async def process_once(self) -> int:
         await self._apply_progress()
         await self._show_typing()
+        await self._notify_overdue()
         delivered = 0
         for item in scan_outbox(self._outbox_dir, min_age_seconds=self._min_file_age):
             if await self._deliver(item):
@@ -201,7 +205,36 @@ class OutboxWatcher:
                 logger.info("Статус задачи %s: %r", task_id, progress[:200])
 
     def _typing_chats(self) -> set[int]:
-        return {task.chat_id for task in self._store.pending()}
+        """Чаты с задачами в работе; после таймаута «печатает…» больше не показываем."""
+        tasks = self._store.pending()
+        if self._task_timeout is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=self._task_timeout)
+            tasks = [task for task in tasks if parse_time(task.created_at) >= cutoff]
+        return {task.chat_id for task in tasks}
+
+    async def _notify_overdue(self) -> None:
+        """Один раз предупреждает, если на задачу долго нет ответа."""
+        if self._task_timeout is None:
+            return
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self._task_timeout)
+        for task in self._store.overdue(cutoff):
+            minutes = max(1, round(self._task_timeout / 60))
+            reply_to = (
+                ReplyParameters(message_id=task.ack_message_id, allow_sending_without_reply=True)
+                if task.ack_message_id else None
+            )
+            try:
+                await self._bot.send_message(
+                    task.chat_id,
+                    f"⌛ Задача {task.task_id} в работе уже больше {minutes} мин без ответа.\n"
+                    "Возможно, она ещё выполняется, а может, зависла. Если ответ появится, пришлю его сюда.",
+                    reply_parameters=reply_to,
+                )
+            except TelegramAPIError as exc:
+                logger.warning("Не удалось предупредить о долгой задаче %s: %s", task.task_id, exc)
+                continue
+            self._store.mark_timeout_notified(task.task_id)
+            logger.warning("Задача %s без ответа дольше %s мин", task.task_id, minutes)
 
     async def _show_typing(self) -> None:
         """«печатает…» в чатах, где есть задачи в работе (Telegram держит его ~5 с)."""

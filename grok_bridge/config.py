@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     outbox_poll_seconds: float = Field(default=2.0, gt=0)
     # Показывать «печатает…», пока задача в работе
     typing_indicator: bool = True
+    # Через сколько минут без ответа предупредить, что задача ещё в работе или зависла. 0 — не предупреждать
+    task_timeout_minutes: float = Field(default=15.0, ge=0)
 
     # Сообщения с паузой меньше этой склеиваются в одну задачу (альбомы, фото + текст). 0 — не склеивать
     message_debounce_seconds: float = Field(default=2.5, ge=0)

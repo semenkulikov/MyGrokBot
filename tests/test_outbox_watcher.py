@@ -82,3 +82,37 @@ def test_typing_for_pending_chats(tmp_path: Path) -> None:
 def test_progress_message_is_truncated() -> None:
     text = progress_message("t1", "x" * 5000)
     assert len(text) <= 4096 and text.endswith("(задача t1)")
+
+
+def _age_task(store: TaskStore, task_id: str, minutes: float) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    created = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    with store._conn:  # тест подкручивает время создания
+        store._conn.execute("UPDATE tasks SET created_at = ? WHERE task_id = ?", (created, task_id))
+
+
+def test_timeout_warns_once_and_stops_typing(tmp_path: Path) -> None:
+    watcher, store, bot = _watcher(tmp_path, typing_interval_seconds=0, task_timeout_seconds=15 * 60)
+    store.add("old", 42, 42, "долгая")
+    store.set_ack_message("old", 5)
+    store.add("fresh", 7, 7, "новая")
+    _age_task(store, "old", 20)
+
+    asyncio.run(watcher.process_once())
+    asyncio.run(watcher.process_once())
+
+    warnings = [m for m in bot.sent if "без ответа" in m.text]
+    assert [(m.chat_id, "old" in m.text) for m in warnings] == [(42, True)]
+    assert bot.sent_kwargs[0]["reply_parameters"].message_id == 5
+    assert (42, "typing") not in bot.actions and (7, "typing") in bot.actions
+    task = store.get("old")
+    assert task is not None and task.timeout_notified and task.status is TaskStatus.PENDING
+
+
+def test_timeout_disabled(tmp_path: Path) -> None:
+    watcher, store, bot = _watcher(tmp_path, typing_interval_seconds=None, task_timeout_seconds=None)
+    store.add("old", 42, 42, "долгая")
+    _age_task(store, "old", 600)
+    asyncio.run(watcher.process_once())
+    assert bot.sent == []
