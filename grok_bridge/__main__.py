@@ -15,6 +15,7 @@ from grok_bridge.bot.handlers import build_routers
 from grok_bridge.config import ENV_FILE, Settings
 from grok_bridge.logging_setup import setup_logging
 from grok_bridge.services.batcher import MessageBatcher
+from grok_bridge.services.janitor import Janitor
 from grok_bridge.services.outbox_watcher import OutboxWatcher
 from grok_bridge.services.task_service import TaskService
 from grok_bridge.services.webhook_client import WebhookClient
@@ -80,7 +81,15 @@ async def run(settings: Settings) -> None:
         task_timeout_seconds=settings.task_timeout_minutes * 60 or None,
         markdown=settings.reply_format == "markdown",
     )
-    watcher_task = asyncio.create_task(watcher.run(), name="outbox-watcher")
+    background = [asyncio.create_task(watcher.run(), name="outbox-watcher")]
+    if settings.cleanup_max_age_days > 0:
+        janitor = Janitor(
+            runtime_dirs=(settings.sent_dir, settings.failed_dir, settings.inbox_dir),
+            log_dir=settings.log_dir,
+            max_age_days=settings.cleanup_max_age_days,
+            interval_hours=settings.cleanup_interval_hours,
+        )
+        background.append(asyncio.create_task(janitor.run(), name="janitor"))
 
     try:
         with contextlib.suppress(Exception):
@@ -89,9 +98,11 @@ async def run(settings: Settings) -> None:
         await dp.start_polling(bot)
     finally:
         await batcher.close()
-        watcher_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await watcher_task
+        for task in background:
+            task.cancel()
+        for task in background:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await webhook.close()
         await bot.session.close()
         store.close()

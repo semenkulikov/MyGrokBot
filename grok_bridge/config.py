@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # Bot API отдаёт ботам файлы не больше 20 МБ
     max_download_mb: float = Field(default=20.0, gt=0)
 
+    # Чистка runtime/sent, runtime/failed, runtime/inbox и старых логов. 0 — не чистить
+    cleanup_max_age_days: float = Field(default=14.0, ge=0)
+    cleanup_interval_hours: float = Field(default=6.0, gt=0)
+
     runtime_dir: Path = BASE_DIR / "runtime"
     log_dir: Path = BASE_DIR / "logs"
     log_level: str = "INFO"
