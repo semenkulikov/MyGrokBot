@@ -86,3 +86,27 @@ def test_forwarded_photo_album_text_and_files(tmp_path: Path) -> None:
         ("photo", "01-photo.jpg", "что тут?"),
         ("document", "02-cv.pdf", None),
     ]
+
+
+def test_reply_to_bot_message_continues_task(tmp_path: Path) -> None:
+    webhook = FakeWebhook()
+    service, store = _service(tmp_path, webhook)
+    bot = FakeBot()
+    store.add("20261028-100000-aaaaaa", 100, 100, "старая")
+    store.link_messages("20261028-100000-aaaaaa", 100, [555])
+    reply = make_message(
+        message_id=7,
+        text="а теперь сделай так",
+        reply_to_message={"message_id": 555, "date": 0, "chat": {"id": 100, "type": "private"}, "text": "ответ бота"},
+    )
+
+    task_id = asyncio.run(service.submit_messages(bot, [reply]))  # type: ignore[arg-type]
+
+    (payload,) = webhook.calls
+    assert payload["parent_task_id"] == "20261028-100000-aaaaaa"
+    assert payload["reply_to_text"] == "ответ бота"
+    task = store.get(task_id)
+    assert task is not None and task.parent_task_id == "20261028-100000-aaaaaa"
+    # и пользовательское сообщение, и «Принял…» теперь ведут к новой задаче
+    assert store.task_for_message(100, 7) == task_id
+    assert store.task_for_message(100, bot.sent[0].message_id) == task_id

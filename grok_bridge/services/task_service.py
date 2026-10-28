@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from aiogram import Bot
-from aiogram.types import Message
+from aiogram.types import Message, ReplyParameters
 
 from grok_bridge.services.attachments import (
     AttachmentRef,
@@ -23,6 +23,7 @@ from grok_bridge.storage import TaskStatus, TaskStore
 logger = logging.getLogger(__name__)
 
 ACK_TEXT = "Принял, работаю…"
+REPLY_TEXT_LIMIT = 1000
 
 
 def new_task_id() -> str:
@@ -64,16 +65,34 @@ class TaskService:
         self._inbox_dir = inbox_dir
         self._max_download_bytes = max_download_bytes
 
+    def find_parent(self, messages: Sequence[Message]) -> tuple[str | None, str | None]:
+        """(parent_task_id, текст сообщения, на которое ответили) — по первому reply в пачке."""
+        for message in messages:
+            replied = message.reply_to_message
+            if replied is None:
+                continue
+            parent = self._store.task_for_message(message.chat.id, replied.message_id)
+            quoted = (replied.text or replied.caption or "")[:REPLY_TEXT_LIMIT] or None
+            return parent, quoted
+        return None, None
+
     async def submit_messages(self, bot: Bot, messages: Sequence[Message]) -> str:
         """Одна задача из сообщений пользователя (одного или пачки подряд)."""
         first = messages[0]
         refs = [ref for message in messages for ref in extract_attachments(message)]
+        parent_task_id, reply_to_text = self.find_parent(messages)
+        extra: dict[str, Any] = {}
+        if reply_to_text is not None:
+            extra["reply_to_text"] = reply_to_text
         return await self.submit(
             bot,
             chat_id=first.chat.id,
             user_id=first.from_user.id if first.from_user else first.chat.id,
             text=combine_text(messages),
             attachments=refs,
+            parent_task_id=parent_task_id,
+            source_message_ids=[m.message_id for m in messages],
+            extra=extra,
         )
 
     async def submit(
@@ -84,15 +103,28 @@ class TaskService:
         user_id: int,
         text: str,
         attachments: Sequence[AttachmentRef] = (),
+        parent_task_id: str | None = None,
+        source_message_ids: Sequence[int] = (),
         extra: dict[str, Any] | None = None,
     ) -> str:
         task_id = new_task_id()
-        self._store.add(task_id=task_id, chat_id=chat_id, user_id=user_id, text=text)
-        logger.info("Новая задача %s от %s: %s", task_id, user_id, _describe_for_log(text, attachments))
+        self._store.add(task_id=task_id, chat_id=chat_id, user_id=user_id, text=text, parent_task_id=parent_task_id)
+        logger.info(
+            "Новая задача %s от %s%s: %s",
+            task_id, user_id, f" (продолжение {parent_task_id})" if parent_task_id else "",
+            _describe_for_log(text, attachments),
+        )
 
-        ack = await bot.send_message(chat_id, f"{ACK_TEXT}\n(задача {task_id})")
+        reply_to = (
+            ReplyParameters(message_id=source_message_ids[0], allow_sending_without_reply=True)
+            if source_message_ids else None
+        )
+        ack = await bot.send_message(chat_id, f"{ACK_TEXT}\n(задача {task_id})", reply_parameters=reply_to)
+        self._store.link_messages(task_id, chat_id, [*source_message_ids, ack.message_id])
 
         payload: dict[str, Any] = {"outbox_dir": str(self._outbox_dir), **(extra or {})}
+        if parent_task_id is not None:
+            payload["parent_task_id"] = parent_task_id
         if attachments:
             payload["files"] = await download_attachments(
                 bot, list(attachments), self._inbox_dir / task_id, self._max_download_bytes

@@ -156,7 +156,7 @@ class OutboxWatcher:
             return False
 
         try:
-            await self._send(chat_id, item)
+            message_ids = await self._send(chat_id, item)
         except (TelegramAPIError, OSError) as exc:
             attempts = self._attempts.get(item.task_id, 0) + 1
             self._attempts[item.task_id] = attempts
@@ -169,19 +169,25 @@ class OutboxWatcher:
             return False
 
         archive(item, self._sent_dir)
+        self._store.link_messages(item.task_id, chat_id, message_ids)
         self._store.set_status(item.task_id, TaskStatus.DONE)
         self._attempts.pop(item.task_id, None)
         logger.info("Ответ на задачу %s отправлен в чат %s", item.task_id, chat_id)
         return True
 
-    async def _send(self, chat_id: int, item: OutboxItem) -> None:
+    async def _send(self, chat_id: int, item: OutboxItem) -> list[int]:
+        """Отправляет ответ и возвращает id сообщений (чтобы reply на них продолжал задачу)."""
         text = item.read_text()
+        message_ids: list[int] = []
         if item.photo_path is not None:
             caption = text if len(text) <= TELEGRAM_CAPTION_LIMIT else None
-            await self._bot.send_photo(chat_id, FSInputFile(item.photo_path), caption=caption or None)
+            sent = await self._bot.send_photo(chat_id, FSInputFile(item.photo_path), caption=caption or None)
+            message_ids.append(sent.message_id)
             if caption is not None:
-                return
+                return message_ids
         elif not text:
             text = "(пустой ответ)"
         for chunk in split_text(text):
-            await self._bot.send_message(chat_id, chunk)
+            sent = await self._bot.send_message(chat_id, chunk)
+            message_ids.append(sent.message_id)
+        return message_ids
